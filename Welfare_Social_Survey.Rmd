@@ -1,0 +1,774 @@
+---
+title: "ML Causal Inference"
+output: html_document
+date: "2024-05-11"
+name: "Hiyab Negga"
+---
+
+```{r setup, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=20, fig.height=15)
+
+```
+
+## Loading Packages 
+
+```{r message = FALSE}
+library(dplyr)
+library(grf)
+library(rpart)
+library(glmnet)
+library(splines)
+library(lmtest)
+library(MASS)
+library(sandwich)
+library(ggplot2)
+library(reshape2)
+library(stringr)
+library(gridExtra)
+library(modeltools)
+library(ggthemes)
+```
+
+```{r}
+# We will set the seed for reproducibility 
+set.seed(123)
+# Plot size options
+options(repr.plot.width = 20, repr.plot.height = 15)
+```
+
+## Loading Dataset & Preliminary Setups
+
+In this section we will read the data set, explore the, the structure, summary statistics, as well as inspect the first five rows. 
+
+```{r}
+# Read the dataset using read.csv()
+url <- "https://raw.githubusercontent.com/hn11-44/ML-Causal-Inference-Welfare/main/welfare-small.csv"
+welfare_dataset = read.csv(url)
+
+# Check the structure of the dataset 
+str(welfare_dataset)
+
+# Get the summary statistics of the dataset
+summary(welfare_dataset)
+
+# View the first top five values of the dataset 
+head(welfare_dataset)
+
+
+```
+The data set is of a randomized controlled trial, with records of individuals' opinion on government spending on the social safety net. In this setting we have two groups where each group was asked about government spending using different wordings:
+
+* Treatment Group ($w_i = 1$), "Do you think the government spends too much on welfare"
+* Control Group ($w_i = 0$), "Do you think the government spends too much on assitance to the poor"
+
+In this particular case we are interested how the questions are worded impact the participants perspective on government spending. Thus our outcome is represented by $y$ with:
+
+* $y = 1$, which corresponds to a positive answer. This means that respondents think that government spends too much.
+* $y = 0$, otherwise. This represents that the respondents do not think that the government spends too much.  
+
+
+We are controlling for the demographics characteristics of participants by using the following covariates:
+
+* age,
+* polviews,
+* income,  
+* education,
+* martial and
+* sex.
+
+Inspecting the summary statistics, we can see that our respondents' age ranges from 18 years old to 89 years old. And we can also see that the income ranges from 1 to 12, which is safe to assume that it has undergone some form of treatment and the measures are not clear. We can also see that education takes on values ranging from 0 to 20, and for the remaining of the analysis we will assume the covariate is measured in years.
+
+
+
+Let us start by conducting a simple check if we have any duplicates or if we have any missing values within the data set.
+
+```{r}
+# Check if there are any missing values within the dataset
+num_missing <- sum(is.na(welfare_dataset))
+print(paste("Number of missing values:", num_missing))
+
+# Check if there are any duplicated within the dataset
+num_duplicated <- sum(duplicated(welfare_dataset))
+print(paste("Number of Duplicates: ", num_duplicated ))
+```
+
+```{r}
+# Create a treatment variable
+treatment <- "w"
+
+# Create an outcome variable
+outcome <- "y"
+
+# Create a matrix of the covariates
+covariates <- c("age", "polviews", "income", "educ",  "marital", "sex")
+```
+
+
+We do not have any missing values or any duplicates within the data set. 
+
+## Exploratory Data Analysis
+
+Before we conduct any analysis let us get a quick exploration of our dataset using visualization by starting out with histograms and scatter plots. 
+
+```{r}
+plot_histograms <- function(df, var_names){
+
+  " The function takes two values
+     the name of the dataframe,
+     the variables you want to plot.
+
+      The goal is to loop over the variables we input
+      for our specific datset and create a histogram for each
+      of the variable. We will store the plots in an empty list
+      we have cretaed. The final output of all the plots will be
+      arranged using a grid view "
+
+  # Create an empty list to store our plots
+
+  plot_list <- list()
+
+  # Looping over the variables names in our df
+
+  for (var in var_names){
+
+    p <- ggplot(df, aes_string(var)) +
+          geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+          labs(title = paste("Histogram of" ,var), x = var, y = "Count")
+
+    # Add the plot to the list
+
+    plot_list[[var]] <- p
+  }
+
+  # Arrange the plots in a grid
+  grid.arrange(grobs = plot_list, ncol = 2 )
+
+}
+
+plot_histograms(welfare_dataset, covariates)
+
+```
+
+
+Just by taking a quick observation at our plots we can see that we have many observation between the ages of 35 to early 40s. It is evident that we observations that are mostly young. When inspecting income, it is evident that is left skewed with many of the observation having a high income. As for education we can see that most frequent value is around 12, which may indicate high school graduates. The most occurring value for political value is 4 moderate. The value of 5 and above indicated liberals(left-wings) and values below 4 indicate conservatives(right-wings). We can see that gender is represented with not a slight imbalance but not so significant that would skew results.Lastly, the most frequent occurring value for marital status is 1, and since we do not what this still represents, we can not say further.
+
+
+## Difference in Means 
+In this section we compute the simple difference-in-mean between the treatment and the control groups without inspecting the causality aspect. This is a very simple way of getting a sense of the effect of a treatment. We will compute the t-statistic and the p-value to test out hypotheis. 
+
+This will enable us to see the difference relative to the variation within the data. Finally we will report the p-value to measure the probability of observing our t-statistic. If our p-value is small we will reject the null hypothesis.
+
+
+With regard to our hypothesis we are testing:
+
+* $H_0: \mu_{c} = \mu{t}$
+* $H_1: \mu_{c} \ne \mu_{t}$
+```{r}
+compute_diff_in_means <- function(dataset, treatment_var, outcome_var, covariate_vars) {
+  # Create a treatment variable
+  treatment <- dataset[[treatment_var]]
+
+  # Create an outcome variable
+  outcome <- dataset[[outcome_var]]
+
+  # Create a matrix of the covariates
+  covariates <- dataset[, covariate_vars]
+
+  # Sample averages of the treatment and the control
+  mean_treatment <- mean(outcome[treatment == 1])
+  mean_control <- mean(outcome[treatment == 0])
+
+  # Computing the difference-in-means estimator
+  diff_in_means <- mean_treatment - mean_control
+
+  # Computing the standard error
+  se <- sqrt(var(outcome[treatment == 1])/sum(treatment == 1)
+            + var(outcome[treatment == 0])/sum(treatment == 0))
+
+  # Compute the t-statistic
+  t_stat <- diff_in_means/se
+
+  # Compute the p-value
+  p_value <- 2 * pt(abs(t_stat), df = length(outcome[treatment == 1]) + length(outcome[treatment == 0]) - 2, lower.tail = FALSE)
+
+  # Print the difference-in-means estimator
+  cat("Difference-in-means estimator:", diff_in_means, "\n")
+
+  # Print the standard error
+  cat("Standard error:", se, "\n")
+
+  # Print the t-statistic
+  cat("t-statistic:", t_stat, "\n")
+
+  # Print the p-value
+  cat("p-value:", p_value, "\n")
+}
+compute_diff_in_means(welfare_dataset, treatment, outcome, covariates)
+
+```
+Based on the initial inspection of the difference-in-mean estimator we can see a negative value of -0.34 which suggest that individuals who were asked using the word "welfare" (treatment group) we less likely to think the government spensa too much compared to those who were asked using the words "assistance to the poor" (control group). We can see that our standard error is very small and this indicates that the estimates are fairly precise. Our t-statistic takes on a large negative value of approximately -72 suggesting that the difference in mean is statistically significant and not due to random chance. Lastly we ge a p-value of 0 which would allow us to reject the null hypothesis, concluding there is significant difference between our treated group and our control group. 
+
+
+## Biased Sample
+
+So in this stage we create our biased sample based on the covariates, "age" and "polviews". We then use Bernoulli random variable to draw each individual in the group. We are creating a bias to see of the wording of the question might have an impact on the younger and more liberal individuals by making them more prominent within the treated group and less prominent in the control.
+
+* Group 1:
+
+  * Treated $(w_i = 1),~ \text{age} \gt 45 ~\text{(older)},~ \text{polviews} \lt 5~\text{(conservative)}$, OR
+
+  
+  * Untreated $(w_i = 0),~  \text{age}  \lt 45~\text{younger},~ \text{polviews} \gt 4~ (\text{liberal})$
+  
+    With probability 15% of the individuals within this group to be kept in the sample.
+    
+* Group 2: In this group we include all individuals not included in Group 1 with the probability of 85% of the individuals to be kept in the sample.
+
+```{r}
+# Define the group and the complement of the group
+group1 <- welfare_dataset %>%
+          filter((w == 1 & (age > 45 | polviews < 5)) |
+                  (w == 0 & (age < 45 | polviews > 4)))
+
+group2 <- anti_join(welfare_dataset, group1, by = "X")
+
+# Let us draw a Bernoulli random variable for each individual in the group
+# and add a column with the name keep that would serve as an indicator
+
+group1$keep <- rbinom(nrow(group1), 1, 0.15)
+group2$keep <- rbinom(nrow(group2), 1, 0.85)
+
+# Let us name our final results biased_sample and row bind both groups to create
+# our full data set of the biased
+
+biased_sample <- rbind(group1 %>% filter(keep == 1), group2 %>% filter(keep ==1))
+```
+
+In order to visualize what the results of the biased sample we will use the scatter plot. We expect to see that the treated population is younger and more liberal while treated population is older and more conservative. 
+
+
+```{r}
+plot_scatterplots <- function(df, var_pairs, conditions = list(), main_title = NULL) {
+  # Create an empty list to store plots
+  plot_list <- list()
+
+  # Loop over variable pairs
+  for (i in 1:length(var_pairs)) {
+    # If conditions are provided, subset the data for each plot
+    if (length(conditions) >= i) {
+      df_sub <- df[df[[conditions[[i]][1]]] == conditions[[i]][2], ]
+      condition_label <- paste("Condition:", conditions[[i]][1], "=", conditions[[i]][2])
+    } else {
+      df_sub <- df
+      condition_label <- "No condition"
+    }
+
+    # Create a scatter plot for each pair of variables
+    p <- ggplot(df_sub, aes_string(x = var_pairs[[i]][1], y = var_pairs[[i]][2])) +
+      geom_point() +
+      labs(title = paste(main_title[[i]], "\n", condition_label),
+           x = var_pairs[[i]][1],
+           y = var_pairs[[i]][2])
+
+    # Add the plot to the list
+    plot_list[[i]] <- p
+  }
+
+  # Arrange the plots in a grid
+  grid.arrange(grobs = plot_list, ncol = 2)
+}
+
+
+# Specify the variables to be plotted on the scatter plot
+var_pairs <-  list(c("age", "polviews"), c("age", "polviews"))
+# The conditions of treated and untreated for comparison
+conditions <- list(c("w", 1), c("w", 0))
+main_title_original <- list("Original Polviews Vs Age", "Original Polviews Vs Age")
+main_title_biased <- list("Biased Polviews Vs Age", "Biased Polviews Vs Age")
+
+# Using the plot_sctaterplots function to input the variable pairs and the conditions
+plot_scatterplots(welfare_dataset, var_pairs, conditions, main_title_original)
+plot_scatterplots(biased_sample, var_pairs, conditions, main_title_original)
+```
+
+
+```{r}
+compute_diff_in_means(biased_sample, treatment, outcome, covariates)
+```
+
+
+For the biased sampled data we can observe that the difference mean estimator is -0.2, showing that on average outcome for treatement group("welfare") is 0.29 less than the outcome for the control group ("assistance to the poor"). This means that the individuals asked about "welfare" were less likely to give a positive answer compared to those asked about "assistance to the poor". We have small standard error indicating that we have a more precise estimate and a very small value for our p-value, indicating statitiscal significance.
+
+## From Randomized Control Trial to Observational Setting 
+So far we have estimated our average treatment effect in a randomised setting where we assume that the our assigment of our treatment and control is radomised where our observation's potential outcome is independent of the assigment.
+
+$$ Y_i(1), Y_i(0) \perp W_i$$
+
+
+In the following section we will be working in the observational setting, where the condition of the potential outcome being indpendent of the assigment of treatment or control is violated. This would be the equivalent to observing individuals measuring variables as they naturally occcur. Thus we will be utilizing the unconfoudedness and the overlapping assumption in order to work under the violation in order to estimate our average treatement effect. We will be relying on a non-parametric approach in both cases.
+
+For unconfoudedness states that covariates that influence the assignment (treatement or control) are observed. Once we control for the variables, the treatment assignment is independent of the potential outcomes. 
+$$ Y_i(0), Y_i(1) \perp W_i | X_i$$
+
+This basically means that sources of self selection or other factors that can influence the treatment assignment are represented by $W_i$, can be explained by the covariates $X_i$. So when we control for the covariates we basically, our treatment assignment and the potential outcomes become independent, mimicing a randomized control trial. 
+
+Before explaining the overlap assumption we need to define the propensity score: 
+
+$$ e(x) = \mathbb{P}[W_i = 1| X_i = x]$$
+
+For the overlap assumption, ensures that for every set of covariates, there is a positive probability of both recieveing and not receiving the treatment. This would mean that we would have a comparable control group for each the treated individual allowing us to estimate treatement effect accurately. 
+
+$$ 0 \lt \eta \lt e(x) \lt 1- \eta \lt 1~~ \forall x$$
+
+where, $e(x)$ is the propensity score, (which represents the probability of receiving treatment given the covariates), and 
+$\eta \gt 0$ (any positive number). The overlap assumption states that we have a positive probability for recieving and not receiving the treatment for all types of individuals in our population. 
+
+So this would basically mean that if the unconfoudedness means that treatment assignment is exogenous and overlap ensure that the randomization has in fact occured and that controlling for X is is statistically practical. 
+
+
+### Direct Estimation 
+
+In this section we estimate the outcomes between the treatead and untreated observations with the same covariates through the direct estimates. 
+
+$$\hat{\tau}_{\text{DM}} = \frac{1}{n} \sum_{i=1}^{n} \hat{\mu}(X_i,1) -\hat{\mu}(X_i, 0)$$
+
+In order to do this we should be following the simple steps of estimating 
+$\mu(x, w)$ by fitting a model to our data to predict our potential outcome($Y_i$) given our covariates $X_i$ and our assignment $W_i$. 
+
+This would the allow us to compute the average differene $\hat{\tau}$ by predicting the $\hat{\mu}(X_i, 1)$ and $\hat{\mu}(X_i, 0)$ for each individuals assumimg they have recieved the treatment $(W_i = 1)$ and they are untreated $(W_i = 0)$. 
+
+```{r}
+compute_direct_estimate <- function(data, covariates, treatment, outcome) {
+  # Create the formula with splines for each covariate
+  #fmla_de <- as.formula(paste(outcome, " ~ ", paste(paste0("bs(", covariates, ", df=3) * ", treatment), collapse=" + ")))
+  fmla_de <- as.formula(paste(outcome, "~", paste(paste0(covariates, "*", treatment), collapse = "+")))
+
+  # Fit the model
+  direct_estimate <- lm(fmla_de, data = data)
+
+  # Predict the potential outcomes under both treatment conditions
+  mu_hat_treated <- predict(direct_estimate, newdata = transform(data, w = 1))
+  mu_hat_control <- predict(direct_estimate, newdata = transform(data, w = 0))
+  actual_estimate <- predict(direct_estimate, newdata = data)
+
+  # Compute the difference in means
+  tau_de <- mean(mu_hat_treated - mu_hat_control)
+  
+  return(list(estimate_de = tau_de))
+}
+
+tau_de <- compute_direct_estimate(biased_sample, covariates, treatment, outcome)
+print(tau_de)
+```
+
+
+
+So we start by estimating the propensity score using a logit regression. This will be our probability that an individual recieved treatment given their covariates. Since we are estimating the treatments we will regress the our treatment ($W_i$) on the covariates ($X_i$) using a logistic regression model. 
+
+Then we will be using our estimated propensity score to compute the IPW estimator: 
+
+$$ Z_i = Y_i \times \bigg(\frac{W_i}{\hat{e}(X_i)} - \frac{(1-W_i)}{(1-\hat{e}(X_i))}\bigg)$$
+
+The IPW estimator summand for each individual is computed as their outcome $Y_i$ multiplied by a weight that depends on their treatment status and their estimated propensity score. This adjusts for the fact that different individuals with different covariates may have different probabilities of receiving the treatment. 
+
+We finalize by taking the mean and the standard error of our new variable $Z_i$, where $Z_i$'s mean represents the average treatment effect. 
+
+
+```{r}
+# Function to estimate propensity scores
+estimate_propensity_scores <- function(data, covriates, tretament) {
+
+  model <- cv.glmnet(x = as.matrix(data[,covariates]) ,y = data[,treatment], family = binomial)
+  predict(model, as.matrix(data[, covariates]), s = "lambda.min", type = "response")
+
+}
+
+# Estimate the porpensity score and save it in a new column called e_hat
+biased_sample$e_hat <- estimate_propensity_scores(biased_sample, covariates, treatments)
+
+# We use store the propensity_score variable with the string e_hat for simplicity
+propensity_score <- "e_hat"
+
+```
+
+We will be checking the overlap of the propensity scores using a simple visualization of the histograms.
+
+
+```{r}
+#The following plot is the histogram of the propensity scores.
+propensity_score_plot <- ggplot(biased_sample, aes(x = e_hat, fill = as.factor(w))) +
+  geom_histogram(alpha = 0.1, position = "identity", bins = 20) +
+  geom_vline(aes(xintercept=1),color="red", linetype="dashed", linewidth=1, alpha = 0.5) +
+  geom_vline(aes(xintercept=0), color="red", linetype="dashed", linewidth=1, alpha = 0.5) +
+  labs(title="", x="Propensity Score", y = "Frequency") +
+  ggthemes::theme_few() +
+  scale_fill_colorblind(name="",labels=c("Control", "Treatment")) +
+  theme(legend.position = "top")
+propensity_score_plot
+```
+
+
+As a preliminary approach we consider the histogram, but we clearly need to assess the balance later on. We do have an overlap between both the distribution which is a good sign. This indicated that for any given propensity soore we actually do have individuals from both the treatment and the control group. One good sign is theat we do have fewer individuals with extreme propwnsity score at 0 and 1 but we can also see there is a difference in density for the treatment. 
+
+```{r}
+compute_ipw_estimate <- function(data, outcome, treatment, propensity_score){
+
+     # Compute the IPW estimator summand (z)
+      z <- data[, outcome] * ((data[, treatment] / data[, propensity_score] - (1 - data[, treatment]) / (1 - data[,propensity_score])))
+
+     # Compute the IPW estimate of the ATE and its standard error
+      tau_ipw <- mean(z)
+      standard_error_ipw <- sd(z) / sqrt(length(z))
+      return(list(estimate_ipw = tau_ipw, standard_error = standard_error_ipw))
+  
+}
+
+tau_ipw <- compute_ipw_estimate(biased_sample, outcome, treatment, propensity_score)
+print(tau_ipw)
+```
+
+So in this section we used the propensity score for each of our observations using and a logistic regression and relying on our non-paramteric approach for the covariates. With the IPW we estimate the average treatment effect $\tau^{\text{IPW}} = -0.32$. This means that the average effect of asking about "welfare" instead of "assistance to the poor" is a decrease in the probability of a positive answer by about 0.32 on average. We can see that this is slightly smaller to our estimated result in the randomized controlled trial. This shows that IPW is somewhat successful to correct for the sampling bias by reweighting the data based on the inverse of the propensity score to retreivng the orginal treatment effect. Furthermore the standard error is very small indicating that we have a precise estimate. 
+
+
+## Augmented Inverse Propensity-Weight (AIPW) Estimator 
+
+In this section we will combine both the IPW and the direct estimation of the treatment effect. 
+
+$$ \hat{\tau} = \frac{1}{n} \sum_{i}^{n} \bigg(\hat{\mu}_{(1)}(X_i) - \hat{\mu}_{(0)}(X_i) + {W_i}\frac{Y_i - \hat{\mu}_{1}(X_i)}{\hat{e}(Xi} - (1 - W_i) \frac{Y_i - \hat{\mu}_{0}(X_i)}{1 - \hat{e}(X_i)}\bigg)$$
+
+So in this section start take the estimated propensity scores $\hat{e}(X_i)$ by regressing the treatment variable on the covariates $X_i$ using a logistic regression. The first term relies on the treatment effect that we had seperately obtained in the previous section when we relied on the direct estimatiom methods. Then the following term is similar to the IPW estimator except we replaced the outcome $Y_i$ with the residulas $Y_i - \hat{\mu}(X_i, W_i)$. 
+
+```{r}
+# Function to compute the AIPW estimate
+compute_aipw_estimate <- function(data, treatment, outcome, covaiates, propensity_score) {
+  
+  # Formula for the direct estimate 
+  fmla_de <- as.formula(paste(outcome, "~", paste(paste0(covariates, "*", treatment), collapse = "+")))
+
+  # Fit the model
+  direct_estimate <- lm(fmla_de, data = data)
+
+  # Predict the potential outcomes under both treatment conditions
+  mu_hat_treated <- predict(direct_estimate, newdata = transform(data, w = 1))
+  mu_hat_control <- predict(direct_estimate, newdata = transform(data, w = 0))
+  actual_estimate <- predict(direct_estimate, newdata = data)
+  
+  # Compute the AIPW estimate
+  G <- (mu_hat_treated - mu_hat_control) + ((data[[treatment]] - data[[propensity_score]]) * (data[[outcome]] - actual_estimate)) / (data[[propensity_score]] * (1 - data[[propensity_score]]))
+  
+
+  tau_ipw <- mean(G)
+  standard_error_aipw <- sd(G) / sqrt(length(G))
+
+  return(list(estimate_aipw = tau_ipw, standard_error_ipw = standard_error_aipw))
+}
+
+# Compute the AIPW estimate
+tau_aipw <- compute_aipw_estimate(biased_sample, treatment, outcome, covariates, propensity_score)
+print(tau_aipw)
+```
+### Causal Forest 
+
+
+In this section we apply the causal_forest function from the grf package in order to deterime the avarage treatment effect by using random forest. The most important aspect is that when using random forest we split the data into  three non overlaping parts, one is used to build the trees in the forest. Then we use the estimation of the treatment within each leaf. Then lastly we have the test section which used to assess the accuracy of the treatment effect estimates and ususally meaure the MSE. But for now we only focus on the estimation aspect. 
+
+
+```{r}
+X <- biased_sample[, covariates]
+
+Y <- biased_sample[, outcome]
+
+W <- biased_sample[, treatment]
+
+causal_forest <- causal_forest(X, Y, W, num.trees = 500 )
+tau_causal_forest_aipw <- average_treatment_effect(causal_forest)
+
+print(tau_causal_forest_aipw)
+
+```
+Our random forest has an average treatment effect which is -0.34 which again suggests that on average individuals who were asked about "welfare" were less likely to give a positive answer compared to those who were just asked about "assistance to the poor" by 0.34. When we compare it to the RCT estimate and the other methods we can see that there is a difference that is the closest than the other methods we have observed. If we mix and use the direct estimate with the random forest propensity and see what happens to the average treatment effect.
+
+### Assessing the Balance with ASMD
+
+We cannot test the overal assumption directly, so we often assess the balance of the covariates between the treated and untreated observations. If the covariates are balanced, this means that the overlap assumption holds. However if they are not further methods must be used in order to improve the overlap. We would check the interaction between the covariates $ Z_i = X_{i,1}, X_{i, 2}$ and check the absolite standardized mean of between the treated and the untreated individuals in our data for each of the covariates. 
+
+$$ \frac{| \bar{Z}_1 - \bar{Z}_0|}{ \sqrt{s_1^2 + s_0^2}}$$
+
+where $\bar{Z}_1$ and $\bar{Z_0}$ are sample averages of $Z_i$ and $s_1$ and $s_0$ are standard deviation of $Z_i$ for the two samples of treated and untreated individuals. 
+
+```{r}
+# Select the covariates from your dataset
+covariates <- biased_sample[, c("age", "polviews", "income", "educ", "marital", "sex")]
+
+# Create a model matrix with all pairwise interactions and squared terms
+interaction_matrix <- model.matrix(~(age + polviews + income + educ + marital + sex)^2 - 1, data = covariates)
+
+# Convert the model matrix to a data frame
+interaction_df <- as.data.frame(interaction_matrix)
+str(interaction_df)
+```
+Our structure clears wout with 21 variables. Now we will proceed with computing the ASMD for the covariates. 
+
+```{r}
+# Compute the ASMD for each variable
+asmd <- sapply(colnames(interaction_df), function(var) {
+  mean_treated <- mean(interaction_df[biased_sample$w == 1, var])
+  mean_control <- mean(interaction_df[biased_sample$w == 0, var])
+  sd_treated <- sd(interaction_df[biased_sample$w == 1, var])
+  sd_control <- sd(interaction_df[biased_sample$w == 0, var])
+  abs(mean_treated - mean_control) / sqrt((sd_treated^2 + sd_control^2) / 2)
+})
+
+print(asmd)
+```
+
+Now that we have our ASMD we will be adjusting them by the propensity score 
+
+$$\frac{Z_i W_i}{e(X_i)}$$ 
+
+and 
+
+$$\frac{Z_i (1-W_i)}{ 1- e(X_i)}$$
+
+We will be utilising the propensity score from that we had from the random forest and computing the adjusted weighed ASMD. Then we will be plotting them an assessing the difference between the ASMD and the weighted. 
+
+```{r}
+asmd_weighted <- function(interaction_df, treatment, propensity_score) {
+  # Compute the ASMD for each variable
+  sapply(colnames(interaction_df), function(var) {
+    mean_treated_adj <- mean(interaction_df[, var] * treatment / propensity_score)
+    mean_control_adj <- mean(interaction_df[, var] * (1 - treatment) / (1 - propensity_score))
+    var_treated_adj <- var(interaction_df[, var] * treatment / propensity_score)
+    var_control_adj <- var(interaction_df[, var] * (1 - treatment) / (1 - propensity_score))
+    std_adj <- sqrt(var_treated_adj + var_control_adj)
+    abs(mean_treated_adj - mean_control_adj) / std_adj
+  })
+}
+
+# Use the function to compute the ASMD for the weighted counterparts
+asmd_weighted_result_rf <- asmd_weighted(interaction_df, biased_sample$w, causal_forest$W.hat)
+asmd_weighted_result_logistic <- asmd_weighted(interaction_df,biased_sample$w, biased_sample$e_hat)
+
+# Print the ASMD for each variable
+print(asmd_weighted_result_rf)
+print(asmd_weighted_result_logistic)
+
+```
+```{r}
+# We use data frame for the ASMD and adjusted ASMDs for the Logistic adn the Random Forest
+asmd_df <- data.frame(
+  Variable = rep(names(asmd), 3),
+  ASMD = c(asmd, asmd_weighted_result_rf, asmd_weighted_result_logistic),
+  Adjustment = rep(c("Unadjusted", "Adjusted CF", "Asjusted Logistic"), each = length(asmd))
+)
+
+# Plotting Adjusted RF and Unadjusted
+plot_rf <- ggplot(asmd_df[asmd_df$Adjustment %in% c("Unadjusted", "Adjusted CF"), ], aes(x = ASMD, y = reorder(Variable, ASMD * (Adjustment == "Unadjusted")), fill = Adjustment)) +
+  geom_col(position = "dodge") +
+  coord_cartesian(xlim = c(0, 1)) +
+  labs(x = "ASMD", y = "Variable", fill = "Adjustment",
+       title = "ASMD Before and After Adjustment with Causal Forest")
+
+# Ploting Adjusted Logistic and Unadjusted
+plot_logistic <- ggplot(asmd_df[asmd_df$Adjustment %in% c("Unadjusted", "Asjusted Logistic"), ], aes(x = ASMD, y = reorder(Variable, ASMD * (Adjustment == "Unadjusted")), fill = Adjustment)) +
+  geom_col(position = "dodge") +
+  coord_cartesian(xlim = c(0, 1)) +
+  labs(x = "ASMD", y = "Variable", fill = "Adjustment",
+       title = "ASMD Before and After Adjustment with Logistic Regression")
+
+# Arrange the plots side by side
+grid.arrange(plot_rf, plot_logistic, ncol = 2)
+```
+When we inspecting the plots for the ASMD before and the after we have adjusted using the propensity score we can see that a clear difference. The plot indicates that when the ASMD values are close to zero that means there is balance. That means that our observations in the treated and the control group are similar in terms of the covariates (characteristics). This would eventually mean that any difference that we observe because of our survey questions and observations response is duew to the wording of the question and not observable confoinding factors. 
+
+Now that we have an idea of what this means and when we look at the unadjusted and the adjusted with the propensity weights we can see that we have we have improved the balance for all of the covariates. Especially if when looking at the Causal Forest we can see that the method is more effective in balancing the covariates. Furthermore we can see that when the covariates are unadjusted the covariates ("age" and "polviews") are imbalanced compared to the rest when inspecting the unadusted ASMD. 
+
+```{r}
+hist(causal_forest$W.hat, main = "", breaks = 100, freq = FALSE, xlab= "", ylab= "", xlim = c(-0.1, 1.1), las = 1)
+```
+
+
+```{r}
+hist(biased_sample$e_hat, main = "", breaks = 100, freq = FALSE, xlab= "", ylab= "", xlim = c(-0.1, 1.1), las = 1)
+```
+
+### High Dimesionality 
+
+In the first section we will be using the interaction covariates we had created in the previous section and utilize them for our propensity score. 
+
+```{r}
+
+# Convert the interaction matrix for covariates as a dataframe
+interaction_covariates <- as.data.frame(interaction_matrix)
+
+# Fit a logistic Lasso model
+fit <- cv.glmnet(as.matrix(interaction_covariates), biased_sample[, treatment], family = "binomial", keep = TRUE, nfolds = 10)
+
+# Get the propensity scores
+propensity_scores_lasso <- predict(fit, newx = as.matrix(interaction_covariates), s = "lambda.min", type = "response")
+```
+
+
+We then use a function to estimate the outcomes we store the result of the treated outcome and the control outcome and the result of the outcomes as we will use them for computation later on. 
+
+```{r, warning= FALSE}
+# We will be dropping the propensity that we have computed so far. 
+biased_modified <- biased_sample[, !names(biased_sample) %in% c("e_hat", "keep", "e_hat_cf")]
+estimate_outcome_lasso <- function(data, covariates, treatment, outcome) {
+  
+  # Select the covariates and create interaction terms
+  interaction_terms <- paste(covariates, collapse = "*")
+  interaction_formula <- as.formula(paste("~", interaction_terms))
+  interaction_df <- model.matrix(interaction_formula, data = data)
+  
+  # Select the covariates and create interaction terms
+  #interaction_df <- model.matrix(~ .*. , data = data[, covariates])
+
+  # Create separate data frames for treated and control groups
+  interaction_df_treated <- data.frame(cbind(interaction_df, treatment = rep(1, nrow(interaction_df))))
+  interaction_df_control <- data.frame(cbind(interaction_df, treatment = rep(0, nrow(interaction_df))))
+
+  # Define a penalty factor vector
+  penalty.factor <- rep(1, ncol(interaction_df_treated))
+
+  # Fit a Lasso model with separate baseline and treatment components
+  fit_treated <- cv.glmnet(as.matrix(interaction_df_treated), data[, outcome], family = "gaussian", penalty.factor = penalty.factor, num.folds = 10)
+  fit_control <- cv.glmnet(as.matrix(interaction_df_control), data[, outcome], family = "gaussian", penalty.factor = penalty.factor, num.folds = 10)
+
+  # Predict the outcome for the treated and control groups
+  outcome_treated <- predict(fit_treated, newx = as.matrix(interaction_df_treated), s = "lambda.min")
+  outcome_control <- predict(fit_control, newx = as.matrix(interaction_df_control), s = "lambda.min")
+
+  # Convert the predicted outcomes to data frames
+  df_treated <- data.frame(outcome = outcome_treated, treatment = rep(1, length(outcome_treated)))
+  df_control <- data.frame(outcome = outcome_control, treatment = rep(0, length(outcome_control)))
+
+  # Combine the data frames
+  df_combined <- rbind(df_treated, df_control)
+
+  # Return the combined data frame and the predicted outcomes
+  return(list(df_combined = df_combined, outcome_treated = outcome_treated, outcome_control = outcome_control))
+}
+
+result_lasso <- estimate_outcome_lasso(biased_modified, covariates, treatment, outcome)
+```
+
+
+Then we will be computing the average treatment effect of by subtracting the average difference of the treated outcome and the control outcome. 
+
+```{r}
+ate_lasso <- mean(result_lasso$outcome_treated - result_lasso$outcome_control)
+print(ate_lasso)
+```
+
+
+We can see the ATE we computing using our Lasso regression is a very small number and is close to zero. This indicated that the average difference does not have an effect on the response. Let us continue by computing the IPW and the AIPW for our Lasso estimates. 
+
+```{r}
+compute_ipw <- function(data, propensity_scores, treatment, outcome) {
+  # Compute weights
+  weights_treated <- 1 / propensity_scores[data[, treatment] == 1]
+  weights_control <- 1 / (1 - propensity_scores[data[, treatment] == 0])
+
+  # Compute the IPW estimator
+  ipw_treated <- sum(weights_treated * data[, outcome][data[, treatment] == 1]) / sum(weights_treated)
+  ipw_control <- sum(weights_control * data[, outcome][data[, treatment] == 0]) / sum(weights_control)
+
+  ipw_estimate <- ipw_treated - ipw_control
+
+  # Return the IPW estimate
+  return(ipw_estimate)
+}
+
+
+ipw_estimate_lasso <- compute_ipw(biased_sample, propensity_scores_lasso, treatment, outcome)
+print(ipw_estimate_lasso)
+```
+
+The estimate using the Lasso propensity score and adjusting for covariates and sampling bias with IPW suggest that on average our observations that were asked about "welfare" were less likely to give a positive answer when we compare them to those that were asked about "assitance to the poor" by about 0.399. 
+
+```{r}
+compute_lasso_aipw <- function(data, propensity_scores, treatment, outcome, result_lasso) {
+  # Compute weights
+  weights_treated <- 1 / propensity_scores[data[, treatment] == 1]
+  weights_control <- 1 / (1 - propensity_scores[data[, treatment] == 0])
+
+  # Compute the Lasso AIPW estimator
+  G <- result_lasso$outcome_treated - result_lasso$outcome_control +
+    data[, treatment] / propensity_scores * (data[, outcome] - result_lasso$outcome_treated) -
+    (1 - data[, treatment]) / (1 - propensity_scores) * (data[, outcome] - result_lasso$outcome_control)
+  
+  aipw_estimate_lasso <- mean(G)
+
+  # Compute the standard error and confidence intervals
+  se <- sqrt(var(G) / length(G))
+  
+
+  ci_lower <- aipw_estimate_lasso - 1.96 * se
+  ci_upper <- aipw_estimate_lasso + 1.96 * se
+
+  # Return the Lasso AIPW estimate and the confidence intervals
+  return(list(aipw_estimate_lasso= aipw_estimate_lasso, standard_error_lasso = se, ci_lower = ci_lower, ci_upper = ci_upper))
+}
+
+lasso_aipw <- compute_lasso_aipw(biased_sample, propensity_scores_lasso, treatment, outcome, result_lasso)
+print(lasso_aipw)
+
+```
+
+### Summary 
+
+```{r}
+# Initialize an empty data frame
+estimators_df <- data.frame()
+
+# Function to compute the confidence interval and append to data frame
+compute_confidence_interval_and_append <- function(estimate, standard_deviation, method_name, confidence_level = 0.95) {
+  # Compute the margin of error
+  margin_of_error <- qnorm((1 + confidence_level) / 2) * standard_deviation
+
+  # Compute the confidence interval
+  lower_bound <- estimate - margin_of_error
+  upper_bound <- estimate + margin_of_error
+
+  # Create a data frame with the results
+  result <- data.frame(
+    method = method_name,
+    estimate = estimate,
+    lower_bound = lower_bound,
+    upper_bound = upper_bound
+  )
+
+  # Append the result to the existing data frame
+  estimators_df <<- rbind(estimators_df, result)
+}
+
+compute_confidence_interval_and_append(-0.3460147 , 0.004804239 , "RCT")
+compute_confidence_interval_and_append(-0.2923834 , 0.008569478, "naive observational")
+compute_confidence_interval_and_append(-0.3226174, 0.01327952, "IPW")
+compute_confidence_interval_and_append(-0.3355296, 0.01077865, "AIPW-OLS")
+compute_confidence_interval_and_append(-0.34938976, 0.01224953 , "AIPW-CF")
+compute_confidence_interval_and_append(-0.3470115, 0.01211676 , "AIPW-Lasso")
+```
+
+
+```{r}
+# Plotting
+p <- ggplot(estimators_df, aes(x = estimate, y = method, color = method)) +
+     geom_point() +
+     geom_errorbarh(aes(xmin = lower_bound, xmax = upper_bound)) +
+     theme_few() +
+     scale_color_viridis_d() +
+     labs(y = "") +
+     theme(legend.position = "none")
+
+print(p)
+```
+
+
+
+
+
+
+
