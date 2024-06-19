@@ -10,6 +10,7 @@ In this particular case we are interested how the questions are worded impact th
  with:
 
 y=1, which corresponds to a positive answer. This means that respondents think that government spends too much.
+
 y=0, otherwise. 
 
 This represents whether the respondents do not think that the government spends too much.
