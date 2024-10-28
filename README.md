@@ -11,9 +11,8 @@ with:
 
 y=1, which corresponds to a positive answer. This means that respondents think that government spends too much.
 
-y=0, otherwise. 
+y=0, otherwise. This represents whether the respondents do not think that the government spends too much.
 
-This represents whether the respondents do not think that the government spends too much.
 We are controlling for the demographics characteristics of participants by using the following covariates:
 
 * age,
